@@ -53,7 +53,7 @@ class RealtimeVoiceAgent {
       voice: config.voice || "alloy",
       systemPrompt:
         config.systemPrompt ||
-        "You are a helpful AI assistant named Yui (pronounced yoo_wee). Keep your responses concise and natural for voice conversation. Respond in English.",
+        "You are a helpful AI assistant named Yui (pronounced yoo_wee). Keep your responses concise and natural for voice conversation. Respond in English. You should start the conversation with a greeting, before waiting for the user's response.",
       enableAudio: config.enableAudio !== false, // Default to true
     };
 
