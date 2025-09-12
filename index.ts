@@ -40,13 +40,9 @@ class RealtimeVoiceAgent {
   private isConnected = false;
   private micInstance: any = null;
   private speaker: any = null;
-  private audioQueue: Buffer[] = [];
-  private isProcessingAudio = false;
-  private audioPreBuffer: Buffer[] = []; // Pre-buffer to prevent underflow
-  private minBufferSize = 3; // Minimum buffers before starting playback
+  private playbackQueue: Buffer[] = [];
+  private isBackpressured = false;
   private uncaughtExceptionHandler: ((error: Error) => void) | null = null;
-  private audioFailureCount = 0; // Track consecutive audio failures
-  private maxAudioFailures = 10; // Disable audio after this many failures
 
   constructor(config: Partial<VoiceAgentConfig> = {}) {
     this.config = {
@@ -65,89 +61,6 @@ class RealtimeVoiceAgent {
     });
   }
 
-  private async processAudioQueue() {
-    if (
-      this.isProcessingAudio ||
-      this.audioQueue.length === 0 ||
-      !this.speaker
-    ) {
-      return;
-    }
-
-    // Wait for minimum buffer before starting playback (prevents underflow)
-    if (
-      this.audioQueue.length < this.minBufferSize &&
-      this.audioPreBuffer.length === 0
-    ) {
-      console.log(
-        `🔄 Buffering audio... (${this.audioQueue.length}/${this.minBufferSize})`
-      );
-      return;
-    }
-
-    this.isProcessingAudio = true;
-
-    try {
-      while (this.audioQueue.length > 0) {
-        const buffer = this.audioQueue.shift();
-        if (buffer && buffer.length > 0) {
-          // Use a simpler approach without timeout - let Speaker handle it
-          try {
-            await new Promise<void>((resolve, reject) => {
-              this.speaker.write(buffer, (error: any) => {
-                if (error) {
-                  console.error("❌ Audio write error:", error);
-                  this.audioFailureCount++;
-                  reject(error);
-                } else {
-                  // Reset failure count on successful write
-                  this.audioFailureCount = 0;
-                  resolve();
-                }
-              });
-            });
-          } catch (writeError: any) {
-            // Check if we should disable audio due to too many failures
-            if (this.audioFailureCount >= this.maxAudioFailures) {
-              console.error(
-                "❌ Too many audio failures - disabling audio output"
-              );
-              this.config.enableAudio = false;
-              this.audioQueue = [];
-              return; // Stop processing
-            }
-
-            console.warn("⚠️  Audio write failed - skipping buffer");
-            // Skip this buffer and continue with next
-            continue;
-          }
-
-          // Smaller delay to maintain smooth audio flow
-          await new Promise((resolve) => setTimeout(resolve, 2));
-        }
-      }
-    } catch (error) {
-      console.error("❌ Audio processing error:", error);
-      // More conservative queue management
-      if (this.audioQueue.length > 20) {
-        console.log("🔄 Reducing audio queue size due to errors");
-        this.audioQueue = this.audioQueue.slice(-10); // Keep only last 10 buffers
-      }
-    } finally {
-      this.isProcessingAudio = false;
-
-      // Continue processing if there's more data
-      if (this.audioQueue.length > 0) {
-        // Add small delay before retrying to prevent tight error loops
-        setTimeout(() => {
-          if (!this.isProcessingAudio) {
-            this.processAudioQueue();
-          }
-        }, 100);
-      }
-    }
-  }
-
   private setupAudio() {
     if (!this.config.enableAudio) {
       console.log("🔇 Audio explicitly disabled");
@@ -160,28 +73,30 @@ class RealtimeVoiceAgent {
     }
 
     try {
-      // Set up speaker for audio output with better configuration
+      // Set up speaker for audio output with simple configuration
       this.speaker = new Speaker({
         channels: 1,
         bitDepth: 16,
         sampleRate: 24000,
-        highWaterMark: 16384, // Even larger buffer size
-        lowWaterMark: 4096, // Higher low water mark
       });
 
       // Handle speaker events
       this.speaker.on("error", (err: Error) => {
         console.error("❌ Speaker error:", err);
-        // Try to recover by clearing the queue
-        this.audioQueue = [];
-        this.audioPreBuffer = [];
-        this.isProcessingAudio = false;
+        // Clear queued buffers on error and reset backpressure
+        this.playbackQueue = [];
+        this.isBackpressured = false;
       });
 
       this.speaker.on("drain", () => {
-        // Speaker is ready for more data - process queue immediately
-        if (this.audioQueue.length > 0 && !this.isProcessingAudio) {
-          setImmediate(() => this.processAudioQueue());
+        // Speaker is ready for more data - flush queued buffers
+        this.isBackpressured = false;
+        while (this.playbackQueue.length > 0) {
+          const nextBuffer = this.playbackQueue.shift()!;
+          if (!this.speaker.write(nextBuffer)) {
+            this.isBackpressured = true;
+            break;
+          }
         }
       });
 
@@ -189,15 +104,6 @@ class RealtimeVoiceAgent {
       this.speaker.on("close", () => {
         console.log("🔊 Speaker closed");
       });
-
-      // Preload speaker with larger silence buffer to prevent initial underflow
-      const silenceBuffer = Buffer.alloc(8192, 0); // Larger silence buffer
-      this.speaker.write(silenceBuffer);
-
-      // Create additional silence buffers in pre-buffer
-      for (let i = 0; i < this.minBufferSize; i++) {
-        this.audioPreBuffer.push(Buffer.alloc(2048, 0));
-      }
 
       // Set up microphone for audio input
       this.micInstance = mic({
@@ -274,7 +180,7 @@ class RealtimeVoiceAgent {
         });
       };
 
-      // Set up audio event handling with error protection
+      // Set up audio event handling with simple backpressure
       safeEventHandler("audio", (event: any) => {
         if (
           this.speaker &&
@@ -284,22 +190,16 @@ class RealtimeVoiceAgent {
         ) {
           const buffer = Buffer.from(event.data);
 
-          // Prevent queue from growing too large (which can cause memory issues)
-          if (this.audioQueue.length > 25) {
-            console.log("⚠️  Audio queue too large, dropping oldest audio");
-            this.audioQueue.shift();
+          // If backpressured or queue has items, enqueue
+          if (this.isBackpressured || this.playbackQueue.length > 0) {
+            this.playbackQueue.push(buffer);
+            return;
           }
 
-          this.audioQueue.push(buffer);
-
-          // Only log every 5th audio packet to reduce noise
-          if (this.audioQueue.length % 5 === 0) {
-            console.log(`🔊 Audio buffered (queue: ${this.audioQueue.length})`);
-          }
-
-          // Process audio queue immediately if not already processing
-          if (!this.isProcessingAudio) {
-            setImmediate(() => this.processAudioQueue());
+          // Try writing directly; if backpressured, set flag
+          const ok = this.speaker.write(buffer);
+          if (!ok) {
+            this.isBackpressured = true;
           }
         }
       });
@@ -433,9 +333,8 @@ class RealtimeVoiceAgent {
     }
 
     // Clean up audio processing
-    this.isProcessingAudio = false;
-    this.audioQueue = [];
-    this.audioPreBuffer = [];
+    this.isBackpressured = false;
+    this.playbackQueue = [];
 
     // Remove global error handler
     if (this.uncaughtExceptionHandler) {
@@ -449,12 +348,6 @@ class RealtimeVoiceAgent {
     // Stop speaker
     if (this.speaker) {
       try {
-        // Write any remaining buffered audio with a small delay
-        if (this.audioQueue.length > 0) {
-          console.log("🔊 Flushing remaining audio...");
-          await new Promise((resolve) => setTimeout(resolve, 100));
-        }
-
         this.speaker.end();
         console.log("🔊 Speaker stopped");
       } catch (error) {
@@ -484,7 +377,7 @@ class RealtimeVoiceAgent {
       voice: this.config.voice,
       instructions: this.config.systemPrompt,
       audioEnabled: this.config.enableAudio,
-      audioQueueSize: this.audioQueue.length,
+      audioQueueSize: this.playbackQueue.length,
     };
   }
 }
@@ -499,7 +392,7 @@ async function main() {
   for (let i = 0; i < args.length; i++) {
     switch (args[i]) {
       case "--voice":
-        config.voice = args[++i];
+        config.voice = args[++i] ?? "cedar";
         break;
       case "--system-prompt":
         config.systemPrompt = args[++i];
