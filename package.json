@@ -10,10 +10,10 @@
     "help": "bun run index.ts --help"
   },
   "dependencies": {
-    "@openai/agents-realtime": "^0.0.8",
+    "@openai/agents-realtime": "^0.1.1",
     "mic": "^2.1.2",
     "node-record-lpcm16": "^1.0.1",
-    "openai": "^4.28.0",
+    "openai": "^5.20.2",
     "speaker": "^0.5.5"
   },
   "devDependencies": {
