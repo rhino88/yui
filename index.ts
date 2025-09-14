@@ -9,22 +9,19 @@ import {
 // Audio libraries - these are now installed as dependencies
 let mic: any = null;
 let Speaker: any = null;
-let recorder: any = null;
 
 // Try to import audio libraries
 try {
   const micModule = require("mic");
   const speakerModule = require("speaker");
-  const recorderModule = require("node-record-lpcm16");
 
   mic = micModule;
   Speaker = speakerModule;
-  recorder = recorderModule;
 
   console.log("✅ Audio libraries loaded successfully");
 } catch (error) {
   console.warn("⚠️  Audio libraries failed to load:", error);
-  console.warn("   Make sure you have: bun add mic speaker node-record-lpcm16");
+  console.warn("   Make sure you have: bun add mic speaker");
 }
 
 interface VoiceAgentConfig {

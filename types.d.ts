@@ -33,9 +33,3 @@ declare module "speaker" {
 
   export = Speaker;
 }
-
-declare module "node-record-lpcm16" {
-  // Basic declaration for now
-  const recorder: any;
-  export = recorder;
-}
