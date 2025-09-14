@@ -181,7 +181,7 @@ class RealtimeVoiceAgent {
       // Create a new realtime session with better configuration
       this.session = new RealtimeSession(this.agent, {
         transport: transport,
-        model: "gpt-4o-realtime-preview-2025-06-03",
+        model: "gpt-realtime",
       });
 
       // Wrap all event handlers in try-catch to prevent SDK errors from crashing
