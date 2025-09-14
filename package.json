@@ -9,7 +9,7 @@
     "help": "tsx index.ts --help"
   },
   "dependencies": {
-    "@openai/agents-realtime": "^0.1.1",
+    "@openai/agents-realtime": "^0.1.2",
     "dotenv": "^17.2.2",
     "mic": "^2.1.2",
     "openai": "^5.20.2",
