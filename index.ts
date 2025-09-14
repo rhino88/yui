@@ -46,7 +46,7 @@ class RealtimeVoiceAgent {
 
   constructor(config: Partial<VoiceAgentConfig> = {}) {
     this.config = {
-      voice: config.voice || "alloy",
+      voice: config.voice || "marin",
       systemPrompt:
         config.systemPrompt ||
         "You are a helpful AI assistant named Yui (pronounced yoo_wee). Keep your responses concise and natural for voice conversation. Respond in English. You should start the conversation with a greeting, before waiting for the user's response.",
