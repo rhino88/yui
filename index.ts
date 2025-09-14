@@ -41,6 +41,8 @@ class RealtimeVoiceAgent {
   private playbackQueue: Buffer[] = [];
   private isBackpressured = false;
   private uncaughtExceptionHandler: ((error: Error) => void) | null = null;
+  private silenceInterval: NodeJS.Timeout | null = null;
+  private silenceBuffer: Buffer | null = null;
 
   constructor(config: Partial<VoiceAgentConfig> = {}) {
     this.config = {
@@ -102,6 +104,28 @@ class RealtimeVoiceAgent {
       this.speaker.on("close", () => {
         console.log("🔊 Speaker closed");
       });
+
+      // Start a low-volume silence keepalive to prevent CoreAudio buffer underflow
+      // This feeds short zeroed PCM chunks only when there's no backpressure and no queued audio
+      const keepaliveMs = 50; // 50ms chunks
+      const bytesPerSecond = 24000 * 2; // 24k samples/sec * 2 bytes per sample (16-bit mono)
+      const silenceBytes = Math.max(
+        1,
+        Math.floor((bytesPerSecond * keepaliveMs) / 1000)
+      );
+      this.silenceBuffer = Buffer.alloc(silenceBytes);
+      if (this.silenceInterval) {
+        clearInterval(this.silenceInterval);
+      }
+      this.silenceInterval = setInterval(() => {
+        if (!this.speaker || !this.config.enableAudio) return;
+        if (this.isBackpressured || this.playbackQueue.length > 0) return;
+        // Write a tiny chunk of silence to keep the output device fed
+        const ok = this.speaker.write(this.silenceBuffer!);
+        if (!ok) {
+          this.isBackpressured = true;
+        }
+      }, keepaliveMs);
 
       // Set up microphone for audio input
       this.micInstance = mic({
@@ -351,6 +375,12 @@ class RealtimeVoiceAgent {
       } catch (error) {
         console.warn("⚠️  Error stopping speaker:", error);
       }
+    }
+
+    // Clear silence keepalive interval
+    if (this.silenceInterval) {
+      clearInterval(this.silenceInterval);
+      this.silenceInterval = null;
     }
 
     // Disconnect session
