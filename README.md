@@ -1,6 +1,6 @@
 # Yui - OpenAI Real-time Voice Agent
 
-A powerful Bun script that enables real-time voice conversations with OpenAI's GPT models using speech-to-text and text-to-speech capabilities.
+A lightweight Node + tsx script that enables real-time voice conversations with OpenAI's GPT models using live audio input/output.
 
 ## Features
 
@@ -13,9 +13,10 @@ A powerful Bun script that enables real-time voice conversations with OpenAI's G
 
 ## Prerequisites
 
-1. **Bun Runtime**: Install Bun from [bun.sh](https://bun.sh)
-2. **OpenAI API Key**: Get your API key from [OpenAI Platform](https://platform.openai.com/api-keys)
-3. **Audio Tools**: Install SoX (Sound eXchange) for audio recording/playback
+1. **Node.js (LTS recommended)**: Install via nvm or nodejs.org
+2. **tsx (TypeScript runner)**: Installed as a dev dependency
+3. **OpenAI API Key**: Get your API key from [OpenAI Platform](https://platform.openai.com/api-keys)
+4. **Audio Tools**: Install SoX (Sound eXchange) for audio recording/playback
 
 ### Installing SoX
 
@@ -40,10 +41,11 @@ choco install sox
 
 ## Setup
 
-1. **Clone and install dependencies:**
+1. **Install dependencies:**
 
 ```bash
-bun install
+npm install
+npm i -D tsx @types/node
 ```
 
 2. **Set up environment variables:**
@@ -63,45 +65,36 @@ OPENAI_API_KEY=your_actual_api_key_here
 ### Basic Usage
 
 ```bash
-bun run index.ts
+npx tsx index.ts
 ```
 
-### With Custom Options
+### With Options
 
 ```bash
 # Use a different voice
-bun run index.ts --voice nova
-
-# Use a different model
-bun run index.ts --model gpt-4
+npx tsx index.ts --voice shimmer
 
 # Custom system prompt
-bun run index.ts --system-prompt "You are a coding assistant"
+npx tsx index.ts --system-prompt "You are a coding assistant"
 
-# Adjust creativity
-bun run index.ts --temperature 0.9
-
-# Limit response length
-bun run index.ts --max-tokens 100
+# Disable audio (connection test only)
+npx tsx index.ts --no-audio
 ```
 
 ### Available Options
 
-- `--model <model>`: OpenAI model to use (default: gpt-4o)
-- `--voice <voice>`: Voice to use (alloy, echo, fable, onyx, nova, shimmer) (default: alloy)
-- `--system-prompt <prompt>`: System prompt for the AI (default: helpful assistant)
-- `--temperature <number>`: Response creativity (0.0-2.0) (default: 0.7)
-- `--max-tokens <number>`: Maximum response length (default: 150)
+- `--voice <voice>`: Voice to use (alloy, ash, ballad, coral, echo, sage, shimmer, verse) (default: alloy)
+- `--system-prompt <prompt>`: System prompt for the AI (default: helpful assistant named Yui)
+- `--no-audio`: Disable audio input/output (connection test mode)
 - `--help`: Show help message
 
 ## How It Works
 
-1. **Recording**: The script records audio from your microphone for up to 10 seconds
-2. **Transcription**: Audio is sent to OpenAI's Whisper model for speech-to-text conversion
-3. **AI Response**: The transcribed text is sent to GPT for response generation
-4. **Speech Synthesis**: The AI response is converted to speech using OpenAI's TTS
-5. **Playback**: The synthesized speech is played through your speakers
-6. **Cleanup**: Temporary audio files are automatically deleted
+1. **Realtime session**: Connects to OpenAI Realtime API over WebSocket
+2. **Audio in**: Streams PCM16 microphone audio to the session
+3. **AI response**: Receives text and PCM16 audio back from the model
+4. **Audio out**: Plays audio through your speakers in near real-time
+5. **Extras**: Server-side VAD, interruption handling, and simple backpressure
 
 ## Voice Options
 
@@ -135,7 +128,7 @@ bun run index.ts --max-tokens 100
 Run in development mode with auto-restart:
 
 ```bash
-bun run dev
+npx tsx --watch index.ts
 ```
 
 ## License

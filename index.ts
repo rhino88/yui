@@ -5,23 +5,24 @@ import {
   RealtimeSession,
   OpenAIRealtimeWebSocket,
 } from "@openai/agents-realtime";
+import "dotenv/config";
 
 // Audio libraries - these are now installed as dependencies
 let mic: any = null;
 let Speaker: any = null;
 
-// Try to import audio libraries
+// Try to import audio libraries (ESM dynamic import)
 try {
-  const micModule = require("mic");
-  const speakerModule = require("speaker");
+  const micImport = await import("mic");
+  const speakerImport = await import("speaker");
 
-  mic = micModule;
-  Speaker = speakerModule;
+  mic = (micImport as any).default ?? (micImport as any);
+  Speaker = (speakerImport as any).default ?? (speakerImport as any);
 
   console.log("✅ Audio libraries loaded successfully");
 } catch (error) {
   console.warn("⚠️  Audio libraries failed to load:", error);
-  console.warn("   Make sure you have: bun add mic speaker");
+  console.warn("   Make sure you have: npm install mic speaker");
 }
 
 interface VoiceAgentConfig {

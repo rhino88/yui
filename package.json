@@ -1,30 +1,37 @@
 {
   "name": "yui",
-  "module": "index.ts",
   "type": "module",
   "scripts": {
-    "start": "bun run index.ts",
-    "start:clean": "bun run index.ts 2>&1 | grep -v 'buffer underflow' | grep -v 'mpg123.*warning'",
-    "dev": "bun --watch index.ts",
-    "voice": "bun run index.ts",
-    "help": "bun run index.ts --help"
+    "start": "tsx index.ts",
+    "start:clean": "tsx index.ts 2>&1 | grep -v 'buffer underflow' | grep -v 'mpg123.*warning'",
+    "dev": "tsx --watch index.ts",
+    "voice": "tsx index.ts",
+    "help": "tsx index.ts --help"
   },
   "dependencies": {
     "@openai/agents-realtime": "^0.1.1",
+    "dotenv": "^17.2.2",
     "mic": "^2.1.2",
     "openai": "^5.20.2",
     "speaker": "^0.5.5"
   },
   "devDependencies": {
-    "@types/bun": "latest",
-    "@types/node": "^20.11.0",
+    "@types/node": "^20.19.14",
+    "tsx": "^4.20.5",
     "typescript": "^5.0.0"
   },
   "engines": {
-    "bun": ">=1.0.0"
+    "node": ">=18"
   },
   "description": "OpenAI Realtime Voice Agent for terminal usage",
-  "keywords": ["openai", "realtime", "voice", "agent", "terminal", "bun"],
+  "keywords": [
+    "openai",
+    "realtime",
+    "voice",
+    "agent",
+    "terminal",
+    "bun"
+  ],
   "author": "",
   "license": "MIT",
   "trustedDependencies": [
