@@ -1,4 +1,4 @@
-#!/usr/bin/env bun
+#!/usr/bin/env node
 
 import {
   RealtimeAgent,
@@ -9,20 +9,20 @@ import "dotenv/config";
 
 // Audio libraries - these are now installed as dependencies
 let mic: any = null;
-let Speaker: any = null;
+let naudiodonLib: any = null;
 
 // Try to import audio libraries (ESM dynamic import)
 try {
   const micImport = await import("mic");
-  const speakerImport = await import("speaker");
+  const naudiodonImport = await import("naudiodon");
 
   mic = (micImport as any).default ?? (micImport as any);
-  Speaker = (speakerImport as any).default ?? (speakerImport as any);
+  naudiodonLib = (naudiodonImport as any).default ?? (naudiodonImport as any);
 
   console.log("✅ Audio libraries loaded successfully");
 } catch (error) {
   console.warn("⚠️  Audio libraries failed to load:", error);
-  console.warn("   Make sure you have: npm install mic speaker");
+  console.warn("   Make sure you have: npm install mic naudiodon");
 }
 
 interface VoiceAgentConfig {
@@ -37,12 +37,30 @@ class RealtimeVoiceAgent {
   private config: VoiceAgentConfig;
   private isConnected = false;
   private micInstance: any = null;
-  private speaker: any = null;
+  private audioOut: any = null;
   private playbackQueue: Buffer[] = [];
   private isBackpressured = false;
   private uncaughtExceptionHandler: ((error: Error) => void) | null = null;
   private silenceInterval: NodeJS.Timeout | null = null;
   private silenceBuffer: Buffer | null = null;
+  private outputSampleRate: number = 24000;
+  private resampleInfoLogged: boolean = false;
+
+  private resample24kTo48k(input: Buffer): Buffer {
+    // PCM16 mono: duplicate each 16-bit sample to 2x
+    const inSamples = input.length / 2;
+    const out = Buffer.allocUnsafe(inSamples * 2 * 2);
+    for (let i = 0; i < inSamples; i++) {
+      const sample = input.readInt16LE(i * 2);
+      out.writeInt16LE(sample, i * 2 * 2);
+      out.writeInt16LE(sample, (i * 2 + 1) * 2);
+    }
+    if (!this.resampleInfoLogged) {
+      console.log("🎚️  Upsampling 24kHz -> 48kHz for output device");
+      this.resampleInfoLogged = true;
+    }
+    return out;
+  }
 
   constructor(config: Partial<VoiceAgentConfig> = {}) {
     this.config = {
@@ -67,48 +85,75 @@ class RealtimeVoiceAgent {
       return;
     }
 
-    if (!Speaker || !mic) {
+    if (!naudiodonLib || !mic) {
       console.log("🔇 Audio libraries not available - running in text mode");
       return;
     }
 
     try {
-      // Set up speaker for audio output with simple configuration
-      this.speaker = new Speaker({
-        channels: 1,
-        bitDepth: 16,
-        sampleRate: 24000,
-      });
+      // Use default output device at a safe sample rate (avoid getDevices due to segfaults)
+      this.outputSampleRate = 48000;
 
-      // Handle speaker events
-      this.speaker.on("error", (err: Error) => {
-        console.error("❌ Speaker error:", err);
+      // Set up PortAudio output stream via naudiodon
+      const baseOutOptions: any = {
+        channelCount: 1,
+        sampleFormat: naudiodonLib.SampleFormat16Bit,
+        sampleRate: this.outputSampleRate,
+        closeOnError: true,
+      };
+      try {
+        this.audioOut = new naudiodonLib.AudioIO({
+          outOptions: baseOutOptions,
+        });
+      } catch (e) {
+        // Fallback: don't bind to a specific device
+        console.warn(
+          "⚠️  Failed to open audio with selected device, retrying with default device",
+          e
+        );
+        this.audioOut = new naudiodonLib.AudioIO({
+          outOptions: baseOutOptions,
+        });
+      }
+
+      // Handle output events
+      this.audioOut.on("error", (err: Error) => {
+        console.error("❌ Audio output error:", err);
         // Clear queued buffers on error and reset backpressure
         this.playbackQueue = [];
         this.isBackpressured = false;
       });
 
-      this.speaker.on("drain", () => {
-        // Speaker is ready for more data - flush queued buffers
+      this.audioOut.on("drain", () => {
+        // Output is ready for more data - flush queued buffers
         this.isBackpressured = false;
         while (this.playbackQueue.length > 0) {
           const nextBuffer = this.playbackQueue.shift()!;
-          if (!this.speaker.write(nextBuffer)) {
+          const chunk =
+            this.outputSampleRate === 24000
+              ? nextBuffer
+              : this.resample24kTo48k(nextBuffer);
+          if (!this.audioOut.write(chunk)) {
             this.isBackpressured = true;
             break;
           }
         }
       });
 
-      // Add 'close' event handler
-      this.speaker.on("close", () => {
-        console.log("🔊 Speaker closed");
+      this.audioOut.on("close", () => {
+        console.log("🔊 Audio output closed");
       });
+      this.audioOut.on("finish", () => {
+        console.log("🔊 Audio output finished");
+      });
+
+      // Start audio output device
+      this.audioOut.start();
 
       // Start a low-volume silence keepalive to prevent CoreAudio buffer underflow
       // This feeds short zeroed PCM chunks only when there's no backpressure and no queued audio
       const keepaliveMs = 50; // 50ms chunks
-      const bytesPerSecond = 24000 * 2; // 24k samples/sec * 2 bytes per sample (16-bit mono)
+      const bytesPerSecond = this.outputSampleRate * 2; // samples/sec * 2 bytes per sample (16-bit mono)
       const silenceBytes = Math.max(
         1,
         Math.floor((bytesPerSecond * keepaliveMs) / 1000)
@@ -118,10 +163,10 @@ class RealtimeVoiceAgent {
         clearInterval(this.silenceInterval);
       }
       this.silenceInterval = setInterval(() => {
-        if (!this.speaker || !this.config.enableAudio) return;
+        if (!this.audioOut || !this.config.enableAudio) return;
         if (this.isBackpressured || this.playbackQueue.length > 0) return;
         // Write a tiny chunk of silence to keep the output device fed
-        const ok = this.speaker.write(this.silenceBuffer!);
+        const ok = this.audioOut.write(this.silenceBuffer!);
         if (!ok) {
           this.isBackpressured = true;
         }
@@ -205,7 +250,7 @@ class RealtimeVoiceAgent {
       // Set up audio event handling with simple backpressure
       safeEventHandler("audio", (event: any) => {
         if (
-          this.speaker &&
+          this.audioOut &&
           this.config.enableAudio &&
           event.data &&
           event.data.byteLength > 0
@@ -219,7 +264,11 @@ class RealtimeVoiceAgent {
           }
 
           // Try writing directly; if backpressured, set flag
-          const ok = this.speaker.write(buffer);
+          const outBuf =
+            this.outputSampleRate === 24000
+              ? buffer
+              : this.resample24kTo48k(buffer);
+          const ok = this.audioOut.write(outBuf);
           if (!ok) {
             this.isBackpressured = true;
           }
@@ -367,13 +416,17 @@ class RealtimeVoiceAgent {
       this.uncaughtExceptionHandler = null;
     }
 
-    // Stop speaker
-    if (this.speaker) {
+    // Stop audio output
+    if (this.audioOut) {
       try {
-        this.speaker.end();
-        console.log("🔊 Speaker stopped");
+        // End the writable stream and stop PortAudio
+        this.audioOut.end();
+        if (typeof this.audioOut.quit === "function") {
+          this.audioOut.quit();
+        }
+        console.log("🔊 Audio output stopped");
       } catch (error) {
-        console.warn("⚠️  Error stopping speaker:", error);
+        console.warn("⚠️  Error stopping audio output:", error);
       }
     }
 

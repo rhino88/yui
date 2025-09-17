@@ -6,5 +6,5 @@
 echo "🎤 Starting Yui Voice Agent (Clean Output Mode)..."
 echo ""
 
-# Run the voice agent and filter out specific audio warnings
-bun run index.ts "$@" 2>&1 | grep -v -E "(buffer underflow|mpg123.*warning|Didn't have any audio data)" 
+# Run the voice agent with Node (tsx) and filter out specific audio warnings
+npx --yes tsx index.ts "$@" 2>&1 | grep -v -E "(buffer underflow|mpg123.*warning|Didn't have any audio data)"
