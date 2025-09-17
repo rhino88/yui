@@ -1,4 +1,5 @@
 python-dotenv>=1.0.1
 openai-agents>=0.3.0
+openai-agents[voice]>=0.3.0
 sounddevice>=0.4.6
 numpy>=1.26

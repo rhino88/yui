@@ -24,6 +24,8 @@ except Exception:
 	RealtimePlaybackTracker = None  # type: ignore
 	RealtimeSession = None  # type: ignore
 	RealtimeSessionEvent = None  # type: ignore
+	def function_tool(fn):  # type: ignore
+		return fn
 try:
 	import sounddevice as sd  # type: ignore
 except Exception:
@@ -52,11 +54,14 @@ CHANNELS = 1
 ENERGY_THRESHOLD = 0.015
 PREBUFFER_CHUNKS = 3
 FADE_OUT_MS = 12
+# Barge-in robustness
+BARGE_IN_FRAMES_REQUIRED = 4  # consecutive frames above threshold while assistant speaks
+ECHO_SUPPRESS_MULTIPLIER = 1.8  # mic must exceed playback RMS by this factor
 
 
 def _sdk_required() -> None:
-	if RTAgent is None or RealtimeRunner is None or RealtimePlaybackTracker is None:
-		print("❌ Realtime SDK not available. Install with: pip install 'openai-agents[voice]'", file=sys.stderr)
+	if RTAgent is None or RealtimeRunner is None:
+		print("❌ Realtime SDK not available. Install with: pip install openai-agents", file=sys.stderr)
 		sys.exit(1)
 	if sd is None:
 		print("❌ sounddevice is required for voice mode. Install with: pip install sounddevice", file=sys.stderr)
@@ -78,14 +83,14 @@ def create_agent(instructions: str) -> Any:
 
 
 class YuiRealtime:
-	def __init__(self, agent: Any) -> None:
+	def __init__(self, agent: Any, barge_in_mode: str = "rms") -> None:
 		self.session: RealtimeSession | None = None
 		self.audio_stream: sd.InputStream | None = None
 		self.audio_player: sd.OutputStream | None = None
 		self.recording = False
 
-		# Playback tracker
-		self.playback_tracker = RealtimePlaybackTracker()
+		# Playback tracker (optional on older SDKs)
+		self.playback_tracker = RealtimePlaybackTracker() if RealtimePlaybackTracker is not None else None
 
 		# Output queue: (samples_np, item_id, content_index)
 		self.output_queue: queue.Queue[Any] = queue.Queue(maxsize=0)
@@ -103,6 +108,12 @@ class YuiRealtime:
 		self.fade_samples = int(SAMPLE_RATE * (FADE_OUT_MS / 1000.0))
 
 		self.agent = agent
+		self.barge_in_mode = barge_in_mode  # "server" or "rms"
+
+		# Echo suppression and VAD state
+		self.recent_playback_rms: float = 0.0
+		self._playback_rms_alpha: float = 0.2  # EMA smoothing for playback RMS
+		self.vad_active_frames: int = 0
 
 	def _output_callback(self, outdata, frames: int, time, status) -> None:
 		if status:
@@ -144,12 +155,23 @@ class YuiRealtime:
 				ramped = np.clip(src * gain, -32768.0, 32767.0).astype(np.int16)
 				outdata[samples_filled : samples_filled + n, 0] = ramped
 
+				# Update recent playback RMS for echo suppression
 				try:
-					self.playback_tracker.on_play_bytes(
-						item_id=item_id, item_content_index=content_index, bytes=ramped.tobytes()
+					play_rms = float(np.sqrt(np.mean((ramped.astype(np.float32) / 32768.0) ** 2)))
+					self.recent_playback_rms = (
+						(1.0 - self._playback_rms_alpha) * self.recent_playback_rms
+						+ self._playback_rms_alpha * play_rms
 					)
 				except Exception:
 					pass
+
+				if self.playback_tracker is not None:
+					try:
+						self.playback_tracker.on_play_bytes(
+							item_id=item_id, item_content_index=content_index, bytes=ramped.tobytes()
+						)
+					except Exception:
+						pass
 
 				samples_filled += n
 				self.chunk_position += n
@@ -196,14 +218,25 @@ class YuiRealtime:
 				samples_filled += samples_to_copy
 				self.chunk_position += samples_to_copy
 
+				# Update recent playback RMS for echo suppression
 				try:
-					self.playback_tracker.on_play_bytes(
-						item_id=item_id,
-						item_content_index=content_index,
-						bytes=chunk_data.tobytes(),
+					play_rms = float(np.sqrt(np.mean((chunk_data.astype(np.float32) / 32768.0) ** 2)))
+					self.recent_playback_rms = (
+						(1.0 - self._playback_rms_alpha) * self.recent_playback_rms
+						+ self._playback_rms_alpha * play_rms
 					)
 				except Exception:
 					pass
+
+				if self.playback_tracker is not None:
+					try:
+						self.playback_tracker.on_play_bytes(
+							item_id=item_id,
+							item_content_index=content_index,
+							bytes=chunk_data.tobytes(),
+						)
+					except Exception:
+						pass
 
 				if self.chunk_position >= len(samples):
 					self.current_audio_chunk = None
@@ -225,7 +258,6 @@ class YuiRealtime:
 		try:
 			runner = RealtimeRunner(self.agent)
 			model_config: Any = {
-				"playback_tracker": self.playback_tracker,
 				"initial_model_settings": {
 					"turn_detection": {
 						"type": "semantic_vad",
@@ -235,6 +267,9 @@ class YuiRealtime:
 					"voice": voice_name,
 				},
 			}
+			# Only include playback tracker if available
+			if self.playback_tracker is not None:
+				model_config["playback_tracker"] = self.playback_tracker
 			async with await runner.run(model_config=model_config) as session:
 				self.session = session
 				print("Connected. Starting audio recording...")
@@ -284,13 +319,26 @@ class YuiRealtime:
 				assistant_playing = (
 					self.current_audio_chunk is not None or not self.output_queue.empty()
 				)
-				if assistant_playing:
-					samples = data.reshape(-1)
-					if rms_energy(samples) >= ENERGY_THRESHOLD:
-						self.interrupt_event.set()
-						await self.session.send_audio(audio_bytes)
-				else:
+				samples = data.reshape(-1)
+				mic_rms = rms_energy(samples)
+				if self.barge_in_mode == "server":
+					# Always stream mic to server; rely on server-side semantic VAD + interruption
+					self.vad_active_frames = 0
 					await self.session.send_audio(audio_bytes)
+				else:
+					# Local RMS-based barge-in (with echo suppression)
+					if assistant_playing:
+						playback_guard = max(ENERGY_THRESHOLD, self.recent_playback_rms * ECHO_SUPPRESS_MULTIPLIER)
+						if mic_rms >= playback_guard:
+							self.vad_active_frames += 1
+							if self.vad_active_frames >= BARGE_IN_FRAMES_REQUIRED:
+								self.interrupt_event.set()
+								await self.session.send_audio(audio_bytes)
+						else:
+							self.vad_active_frames = 0
+					else:
+						self.vad_active_frames = 0
+						await self.session.send_audio(audio_bytes)
 
 				await asyncio.sleep(0)
 		except Exception as e:
@@ -368,7 +416,7 @@ Behavior:
 	_sdk_required()
 	instructions = system_prompt or "You always greet the user with 'Top of the morning to you'."
 	agent = create_agent(instructions)
-	demo = YuiRealtime(agent)
+	demo = YuiRealtime(agent, barge_in_mode="rms")
 	await demo.run(voice_name)
 
 
