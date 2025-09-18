@@ -114,6 +114,8 @@ class YuiRealtime:
 		self.recent_playback_rms: float = 0.0
 		self._playback_rms_alpha: float = 0.2  # EMA smoothing for playback RMS
 		self.vad_active_frames: int = 0
+		# Manual barge-in trigger
+		self.force_barge_in: bool = False
 
 	def _output_callback(self, outdata, frames: int, time, status) -> None:
 		if status:
@@ -274,6 +276,8 @@ class YuiRealtime:
 				self.session = session
 				print("Connected. Starting audio recording...")
 				await self.start_audio_recording()
+				# Start keyboard listener for manual interruption
+				asyncio.create_task(self._keyboard_interrupt_listener())
 				print("Audio recording started. Speak when ready.")
 
 				async for event in session:
@@ -294,6 +298,23 @@ class YuiRealtime:
 		self.audio_stream.start()
 		self.recording = True
 		asyncio.create_task(self.capture_audio())
+
+	async def _keyboard_interrupt_listener(self) -> None:
+		"""Listen for Enter key to trigger manual barge-in."""
+		loop = asyncio.get_running_loop()
+		while self.session is not None:
+			try:
+				# Run blocking stdin.readline in a thread to avoid blocking event loop
+				line = await loop.run_in_executor(None, sys.stdin.readline)
+				if line is None:
+					await asyncio.sleep(0.05)
+					continue
+				# Any Enter press triggers barge-in
+				self.force_barge_in = True
+				# Also fade/flush queued audio via callback
+				self.interrupt_event.set()
+			except Exception:
+				await asyncio.sleep(0.1)
 
 	async def capture_audio(self) -> None:
 		if not self.audio_stream or not self.session:
@@ -328,6 +349,13 @@ class YuiRealtime:
 				else:
 					# Local RMS-based barge-in (with echo suppression)
 					if assistant_playing:
+						# Manual override: if user requested, force immediate interruption
+						if self.force_barge_in:
+							self.interrupt_event.set()
+							self.force_barge_in = False
+							await self.session.send_audio(audio_bytes)
+							await asyncio.sleep(0)
+							continue
 						playback_guard = max(ENERGY_THRESHOLD, self.recent_playback_rms * ECHO_SUPPRESS_MULTIPLIER)
 						if mic_rms >= playback_guard:
 							self.vad_active_frames += 1
