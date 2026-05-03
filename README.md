@@ -1,136 +1,127 @@
-# Yui - OpenAI Real-time Voice Agent
+# Yui (Python) — xAI Grok Voice Agent
 
-A lightweight Node + tsx script that enables real-time voice conversations with OpenAI's GPT models using live audio input/output.
-
-## Features
-
-- 🎤 Real-time voice recording and transcription
-- 🤖 AI-powered conversation with GPT models
-- 🔊 Natural text-to-speech responses
-- ⚙️ Configurable voice, model, and conversation parameters
-- 🧹 Automatic audio file cleanup
-- 📱 Cross-platform compatibility
-
-## Prerequisites
-
-1. **Node.js (LTS recommended)**: Install via nvm or nodejs.org
-2. **tsx (TypeScript runner)**: Installed as a dev dependency
-3. **OpenAI API Key**: Get your API key from [OpenAI Platform](https://platform.openai.com/api-keys)
-4. **Audio Tools**: Install SoX (Sound eXchange) for audio recording/playback
-
-### Installing SoX
-
-**macOS:**
-
-```bash
-brew install sox
-```
-
-**Ubuntu/Debian:**
-
-```bash
-sudo apt-get install sox
-```
-
-**Windows:**
-Download from [SoX website](https://sox.sourceforge.net/) or use Chocolatey:
-
-```bash
-choco install sox
-```
+Realtime voice client for xAI's Voice Agent API.
 
 ## Setup
 
-1. **Install dependencies:**
+Requires Python 3.11+ and PortAudio (for `sounddevice`).
+
+### macOS
 
 ```bash
-npm install
-npm i -D tsx @types/node
+brew install portaudio
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
 ```
 
-2. **Set up environment variables:**
+### Raspberry Pi (Raspberry Pi OS / Debian-based)
+
+Pi OS Bookworm ships Python 3.11. On Bullseye install Python 3.11 via `pyenv` or
+upgrade the OS first.
 
 ```bash
-cp env.example .env
+sudo apt update
+sudo apt install -y python3 python3-venv python3-dev \
+                    portaudio19-dev libatlas-base-dev \
+                    libsndfile1 ffmpeg git
+
+python3 -m venv .venv
+source .venv/bin/activate
+pip install --upgrade pip
+pip install -r requirements.txt
 ```
 
-3. **Edit `.env` file and add your OpenAI API key:**
+Notes for Pi:
+
+- A Pi 4 or Pi 5 is recommended; the wake-word ONNX model is light, but realtime audio + websockets benefits from the extra headroom.
+- List audio devices with `python -c "import sounddevice as sd; print(sd.query_devices())"`. If the default isn't your USB mic / speaker, configure it via `~/.asoundrc` (ALSA) so it becomes the system default.
+- If `pip install` fails on `numpy`/`scipy` wheels, make sure you're on 64-bit Pi OS — 32-bit builds wheels from source and can take a long time.
+
+Create a `.env` file (auto-loaded):
 
 ```bash
-OPENAI_API_KEY=your_actual_api_key_here
+echo "XAI_API_KEY=your_xai_api_key" >> .env
+echo "GOOGLE_API_KEY=your_google_api_key" >> .env   # optional; enables weather/pollen/air-quality tools
 ```
 
-## Usage
+`GOOGLE_API_KEY` needs the Geocoding API plus the Weather, Pollen, and Air Quality APIs enabled in Google Cloud Console.
 
-### Basic Usage
+## Run
 
 ```bash
-npx tsx index.ts
+python yui.py
 ```
 
-### With Options
+## Options
 
 ```bash
-# Use a different voice
-npx tsx index.ts --voice shimmer
-
-# Custom system prompt
-npx tsx index.ts --system-prompt "You are a coding assistant"
-
-# Disable audio (connection test only)
-npx tsx index.ts --no-audio
+python yui.py --voice Ara --model grok-voice-think-fast-1.0 --barge-in rms \
+  --system-prompt "You are Yui, a friendly voice assistant."
 ```
 
-### Available Options
+- `--voice` — `Ara` (default), `Eve`, `Leo`, `Rex`, `Sal`
+- `--model` — defaults to `grok-voice-think-fast-1.0`
+- `--barge-in` — `rms` (local energy gating, default) or `server` (server-side VAD)
+- `--silence-ms N` — silence after speech that ends a turn (default 750; raise if she cuts you off, lower if she feels slow)
+- Press **Enter** at any time to force-interrupt the assistant.
 
-- `--voice <voice>`: Voice to use (alloy, ash, ballad, coral, echo, sage, shimmer, verse) (default: alloy)
-- `--system-prompt <prompt>`: System prompt for the AI (default: helpful assistant named Yui)
-- `--no-audio`: Disable audio input/output (connection test mode)
-- `--help`: Show help message
+Run `python yui.py --help` for the full flag list.
 
-## How It Works
+## Wake word
 
-1. **Realtime session**: Connects to OpenAI Realtime API over WebSocket
-2. **Audio in**: Streams PCM16 microphone audio to the session
-3. **AI response**: Receives text and PCM16 audio back from the model
-4. **Audio out**: Plays audio through your speakers in near real-time
-5. **Extras**: Server-side VAD, interruption handling, and simple backpressure
-
-## Voice Options
-
-- **alloy**: Neutral, balanced voice
-- **echo**: Warm, friendly voice
-- **fable**: Young, energetic voice
-- **onyx**: Deep, authoritative voice
-- **nova**: Bright, enthusiastic voice
-- **shimmer**: Soft, gentle voice
-
-## Troubleshooting
-
-### Audio Issues
-
-- Ensure your microphone is properly connected and configured
-- Check that SoX is installed and working: `sox --version`
-- Test audio recording: `sox -d test.wav trim 0 3`
-
-### API Issues
-
-- Verify your OpenAI API key is correct and has sufficient credits
-- Check that your API key has access to the required models (GPT-4o, Whisper, TTS)
-
-### Permission Issues
-
-- On macOS, ensure the terminal has microphone permissions
-- On Linux, check audio device permissions
-
-## Development
-
-Run in development mode with auto-restart:
+By default Yui starts **asleep** and only wakes when the local wake-word
+detector (`hey_yoo_wee.onnx`, openWakeWord) fires. On wake, Yui greets you and
+starts listening. After ~30 seconds of silence she re-arms the wake word.
 
 ```bash
-npx tsx --watch index.ts
+python yui.py                                   # asleep until wake word
+python yui.py --no-wake-word                    # always on
+python yui.py --wake-word-threshold 0.4         # more sensitive (default 0.5)
+python yui.py --sleep-after 60                  # 60s idle before re-arming
+python yui.py --no-greet                        # silent wake (no greeting)
+python yui.py --wake-word-model ./other.onnx    # different model
 ```
 
-## License
+The detector runs locally — no audio is sent to xAI while asleep. Audio for
+the detector is downsampled 24 kHz → 16 kHz on the fly via `scipy`.
 
-MIT License - feel free to use and modify as needed.
+You can also send Yui back to sleep immediately with short phrases like
+"goodbye", "stop Yui", "go to sleep", "sleep now", or "that's all".
+
+## Memory
+
+Yui keeps a per-user memory file at `~/.yui/memory.json` (override with
+`--memory-path`). On first run she onboards by asking name + birthday and
+saves them via tool calls. After onboarding she captures ongoing
+observations naturally as you talk.
+
+Three function tools handle this:
+
+- `set_profile_field(field, value)` — structured facts (`name`, `birthday`,
+  `pronouns`, `timezone`, `location`, …)
+- `add_observation(text)` — free-form facts she learns in conversation
+- `mark_onboarded()` — flips the first-run flag so she stops asking
+
+Inspect or edit memory directly:
+
+```bash
+cat ~/.yui/memory.json
+```
+
+To start fresh:
+
+```bash
+rm ~/.yui/memory.json
+```
+
+The full memory snapshot is injected into the session instructions at
+connect time, so Yui sees what's already known and won't re-ask.
+
+## Notes
+
+- Audio is PCM16 mono at 24 kHz both directions.
+- WebSocket endpoint: `wss://api.x.ai/v1/realtime?model=<model>`. Available in `us-east-1` only.
+- User transcripts come from `conversation.item.input_audio_transcription.completed` (configured with `grok-2-audio` in `session.update`).
+- Built-in xAI `web_search` is enabled in `session.update` for current/recent web information.
+- `get_weather`, `get_pollen`, and `get_air_quality` are wired up as function tools alongside the memory tools (require `GOOGLE_API_KEY`).

@@ -85,6 +85,22 @@ DEFAULT_WAKE_WORD_MODEL = os.path.join(
 )
 DEFAULT_WAKE_WORD_THRESHOLD = 0.5
 DEFAULT_SLEEP_AFTER_S = 30.0
+SLEEP_COMMAND_PHRASES = {
+	"goodbye",
+	"good bye",
+	"bye",
+	"bye yui",
+	"bye youyui",
+	"stop yui",
+	"stop youyui",
+	"go to sleep",
+	"go back to sleep",
+	"sleep now",
+	"that's all",
+	"that is all",
+	"that'll be all",
+	"that will be all",
+}
 # Note: response.create.response.instructions OVERRIDES session instructions for
 # the turn — it does NOT merge. So the greeting prompt below has to carry any
 # onboarding/memory-aware directives inline; see _compose_greeting_instructions.
@@ -775,6 +791,11 @@ class YuiRealtime:
 			"that you are saving anything. Do not store secrets, payment info, or "
 			"anything the user explicitly asks you not to remember."
 		)
+		parts.append(
+			"WEB SEARCH: You have access to the built-in `web_search` tool. Use it "
+			"when the user asks about current events, recent facts, live web "
+			"information, or anything likely to have changed since your training data."
+		)
 		return "\n".join(parts)
 
 	async def _send_session_update(self) -> None:
@@ -799,7 +820,10 @@ class YuiRealtime:
 				"input": {"format": {"type": "audio/pcm", "rate": SAMPLE_RATE}},
 				"output": {"format": {"type": "audio/pcm", "rate": SAMPLE_RATE}},
 			},
-			"tools": [schema for schema, _ in self.tools.values()],
+			"tools": [
+				{"type": "web_search"},
+				*[schema for schema, _ in self.tools.values()],
+			],
 		}
 		await self._send({"type": "session.update", "session": session})
 
@@ -950,6 +974,21 @@ class YuiRealtime:
 				self.wake_model.reset()
 			except Exception:
 				pass
+
+	def _is_sleep_command(self, transcript: str) -> bool:
+		"""Return True when the user's utterance is an explicit request to sleep."""
+		text = transcript.strip().lower()
+		# Remove common trailing punctuation from speech transcripts.
+		text = text.strip(" .,!?:;\"'“”‘’")
+		if not text:
+			return False
+		if text in SLEEP_COMMAND_PHRASES:
+			return True
+		# Also accept short variants with polite padding.
+		for prefix in ("hey yui ", "okay yui ", "ok yui ", "yui ", "please "):
+			if text.startswith(prefix) and text[len(prefix) :] in SLEEP_COMMAND_PHRASES:
+				return True
+		return False
 
 	def _detect_wake_word(self, samples_24k: np.ndarray) -> bool:
 		"""Resample 24 kHz → 16 kHz and run one wake-word inference step."""
@@ -1181,12 +1220,18 @@ class YuiRealtime:
 				return
 			elif etype == "response.created":
 				self.active_response_id = (event.get("response") or {}).get("id")
+				# If a response races in after an explicit sleep command, cancel it.
+				if not self.awake:
+					await self._cancel_response()
+					return
 			elif etype == "response.output_item.added":
 				item = event.get("item") or {}
 				self.active_item_id = item.get("id", "")
 			elif etype == "response.content_part.added":
 				self.active_content_index = int(event.get("content_index", 0))
 			elif etype == "response.output_audio.delta":
+				if not self.awake:
+					return
 				audio_b64 = event.get("delta") or event.get("audio") or ""
 				if not audio_b64:
 					return
@@ -1198,6 +1243,8 @@ class YuiRealtime:
 			elif etype == "response.output_audio.done":
 				pass
 			elif etype == "response.audio_transcript.delta" or etype == "response.output_audio_transcript.delta":
+				if not self.awake:
+					return
 				delta = event.get("delta", "")
 				if delta:
 					sys.stdout.write(delta)
@@ -1209,6 +1256,10 @@ class YuiRealtime:
 				transcript = event.get("transcript", "")
 				if transcript:
 					print(f"\n👤 {transcript}")
+					if self.awake and self._is_sleep_command(transcript):
+						print("🛌 Sleep command detected")
+						await self._go_to_sleep()
+						return
 			elif etype == "input_audio_buffer.speech_started":
 				# Server VAD detected user speech; treat as barge-in.
 				self.interrupt_event.set()
