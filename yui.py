@@ -5,6 +5,7 @@ import base64
 import json
 import os
 import queue
+import re
 import sys
 import tempfile
 import threading
@@ -85,21 +86,39 @@ DEFAULT_WAKE_WORD_MODEL = os.path.join(
 )
 DEFAULT_WAKE_WORD_THRESHOLD = 0.5
 DEFAULT_SLEEP_AFTER_S = 30.0
+# Whole-word phrases that, when they appear anywhere in an utterance, tell Yui to
+# go back to sleep. Matching is on word boundaries (see _is_sleep_command), so
+# "stop" matches "stop talking yui" but not "nonstop", and these stay liberal on
+# purpose — a false sleep just means saying the wake word again.
 SLEEP_COMMAND_PHRASES = {
 	"goodbye",
 	"good bye",
+	"good night",
+	"goodnight",
+	"night night",
 	"bye",
-	"bye yui",
-	"bye youyui",
-	"stop yui",
-	"stop youyui",
+	"bye bye",
+	"stop",
 	"go to sleep",
 	"go back to sleep",
-	"sleep now",
+	"back to sleep",
+	"go to bed",
+	"go away",
+	"shut up",
+	"shush",
+	"be quiet",
+	"quiet",
+	"leave me alone",
+	"nevermind",
+	"never mind",
 	"that's all",
 	"that is all",
 	"that'll be all",
 	"that will be all",
+	"i'm done",
+	"i am done",
+	"we're done",
+	"we are done",
 }
 # Note: response.create.response.instructions OVERRIDES session instructions for
 # the turn — it does NOT merge. So the greeting prompt below has to carry any
@@ -587,15 +606,8 @@ class YuiRealtime:
 		silence_ms: int = DEFAULT_SILENCE_MS,
 	) -> None:
 		self.memory = memory
-		self.tools = _build_tools(memory)
-		self.base_instructions = instructions
-		self.instructions = self._compose_instructions()
-		self.voice = voice
-		self.model = model
-		self.barge_in_mode = barge_in_mode  # "server" or "rms"
-		self.silence_ms = max(200, int(silence_ms))
 
-		# Wake-word state
+		# Wake-word state (set before instructions/tools — both depend on it).
 		self.wake_word_model_path = wake_word_model_path
 		self.wake_word_threshold = wake_word_threshold
 		self.sleep_after_s = sleep_after_s
@@ -603,6 +615,34 @@ class YuiRealtime:
 		self.wake_model: Any = None  # populated in run()
 		self.awake: bool = wake_word_model_path is None
 		self.last_speech_at: float = time.monotonic()
+
+		self.tools = _build_tools(memory)
+		# When wake-word gating is on, give the model a tool to end the
+		# conversation itself — a backstop for sleep phrasings the local
+		# keyword matcher (_is_sleep_command) doesn't catch.
+		if self.wake_word_model_path is not None:
+			self.tools["go_to_sleep"] = (
+				{
+					"type": "function",
+					"name": "go_to_sleep",
+					"description": (
+						"End the conversation and go back to sleep until the user "
+						"says the wake word again. Call this the moment the user "
+						"signals they are done or want you to stop — e.g. 'goodbye', "
+						"'good night', 'stop talking', \"that's all\", 'go to sleep', "
+						"'leave me alone'. Do not call it mid-task or just because the "
+						"user paused; only on a clear signal they want you to stop."
+					),
+					"parameters": {"type": "object", "properties": {}},
+				},
+				self._tool_go_to_sleep,
+			)
+		self.base_instructions = instructions
+		self.instructions = self._compose_instructions()
+		self.voice = voice
+		self.model = model
+		self.barge_in_mode = barge_in_mode  # "server" or "rms"
+		self.silence_ms = max(200, int(silence_ms))
 
 		self.ws: Optional[ClientConnection] = None
 		self.audio_stream: Optional["sd.InputStream"] = None
@@ -796,6 +836,16 @@ class YuiRealtime:
 			"when the user asks about current events, recent facts, live web "
 			"information, or anything likely to have changed since your training data."
 		)
+		if self.wake_word_model_path is not None:
+			parts.append(
+				"ENDING THE CONVERSATION: When the user clearly signals they are "
+				"done or want you to stop — saying things like 'goodbye', 'good "
+				"night', 'stop talking', \"that's all\", 'go to sleep', or 'leave me "
+				"alone' — call the `go_to_sleep` tool to end the conversation. You "
+				"may give a brief sign-off first if it feels natural, but keep it to "
+				"a few words. Do not call it mid-task or merely because the user went "
+				"quiet."
+			)
 		return "\n".join(parts)
 
 	async def _send_session_update(self) -> None:
@@ -975,20 +1025,25 @@ class YuiRealtime:
 			except Exception:
 				pass
 
+	async def _tool_go_to_sleep(self) -> dict[str, str]:
+		"""Tool handler: the model decided the user wants to end the conversation."""
+		await self._go_to_sleep()
+		return {"status": "asleep"}
+
 	def _is_sleep_command(self, transcript: str) -> bool:
-		"""Return True when the user's utterance is an explicit request to sleep."""
-		text = transcript.strip().lower()
-		# Remove common trailing punctuation from speech transcripts.
-		text = text.strip(" .,!?:;\"'“”‘’")
-		if not text:
+		"""Return True when the user's utterance is a request to go back to sleep.
+
+		Matches a sleep phrase appearing anywhere in the utterance on word
+		boundaries, so loose phrasings like "stop talking yui", "okay yui good
+		night", or "alright that's all for now" all trigger sleep.
+		"""
+		# Keep only letters/apostrophes as words; everything else is a boundary.
+		words = re.findall(r"[a-z']+", transcript.lower())
+		if not words:
 			return False
-		if text in SLEEP_COMMAND_PHRASES:
-			return True
-		# Also accept short variants with polite padding.
-		for prefix in ("hey yui ", "okay yui ", "ok yui ", "yui ", "please "):
-			if text.startswith(prefix) and text[len(prefix) :] in SLEEP_COMMAND_PHRASES:
-				return True
-		return False
+		# Pad so phrase lookups are whole-word: " stop " won't match "nonstop".
+		joined = " " + " ".join(words) + " "
+		return any(f" {phrase} " in joined for phrase in SLEEP_COMMAND_PHRASES)
 
 	def _detect_wake_word(self, samples_24k: np.ndarray) -> bool:
 		"""Resample 24 kHz → 16 kHz and run one wake-word inference step."""
@@ -1320,7 +1375,10 @@ class YuiRealtime:
 				},
 			}
 		)
-		await self._send({"type": "response.create"})
+		# A tool (go_to_sleep) may have ended the conversation — don't kick off a
+		# new response if we're now asleep, or Yui would immediately speak again.
+		if self.awake:
+			await self._send({"type": "response.create"})
 
 
 async def main():
